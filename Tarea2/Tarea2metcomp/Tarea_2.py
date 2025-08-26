@@ -458,8 +458,6 @@ def filtered_backprojection(sinogram: np.ndarray,
         if angles.size != n_angles:
             raise ValueError("angles_degrees debe tener n_ángulos elementos.")
 
-    # MUY IMPORTANTE para que el snippet funcione sin redimensionar:
-    # el ancho de salida debe coincidir con n_det.
     if rows is None:
         rows = int(n_det)
 
@@ -468,7 +466,7 @@ def filtered_backprojection(sinogram: np.ndarray,
     for k, ang in enumerate(angles):
         # 1) proyección 1D y filtrado pasa-altas
         proj = S[k, :]
-        signal = filter_projection(proj)   # ← señal filtrada
+        signal = filter_projection(proj)   # señal filtrada
 
         rotation_angle = ang
         imagen_rotada = ndi.rotate(
