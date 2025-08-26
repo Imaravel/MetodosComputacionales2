@@ -363,14 +363,14 @@ miette_path = "miette.jpg"     # usa tu ruta si difiere
 img_rgb = load_rgb(miette_path)
 blur = fft2_gaussian_blur_rgb(img_rgb, sigma_frac=0.06)  # ajusta 0.04–0.10 si quieres más/menos blur
 save_u8(blur, "3.a.jpg")
-print("Guardado 3.a.jpg")
+
 
 # 3.b.a — Ruido periódico (p_a_t_o)
 pato_path = "p_a_t_o.jpg"      # usa tu ruta si difiere
 pato_gray = load_gray(pato_path)
 pato_clean = remove_periodic_noise(pato_gray, k_peaks=18, r0=10, notch_hw=5, tau=6.0)
 save_u8(pato_clean, "3.b.a.jpg")
-print("Guardado 3.b.a.jpg")
+
 
 # 3.b.b — G_a_t_o (si no existe, usa miette como fallback)
 candidates = []
@@ -402,8 +402,6 @@ for f in freqs:
 
 power = np.array(power)
 f0 = freqs[np.argmax(power)]   
-print(f"Frecuencia encontrada: {f0:.6f} ciclos/día")
-print(f"Periodo estimado: {1/f0:.6f} días")
 
 
 phi = np.mod(f0 * t, 1.0)
