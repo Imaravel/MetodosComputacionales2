@@ -417,116 +417,122 @@ plt.savefig("4.pdf", bbox_inches="tight")
 
 #Utilidades 5
 
-def ram_lak_filter(n: int) -> np.ndarray:
+def clean_filtered_backprojection(sinogram, angles=None):
     """
-    Filtro pasa-altas tipo Ram–Lak (rampa) para rFFT de longitud n.
-    Se normaliza a 1 en Nyquist y se apodiza suavemente con Hann.
+    Clean filtered backprojection implementation focused on image clarity
     """
-    freqs = np.fft.rfftfreq(n)                 # [0, 0.5]
-    H = np.abs(freqs)
-    H /= (H.max() + 1e-12)
-    if H.size > 1:
-        hann = 0.5 - 0.5*np.cos(2*np.pi*np.arange(H.size)/(H.size-1))
-        H *= hann
-    return H
-
-def filter_projection(signal_1d: np.ndarray) -> np.ndarray:
-    """Aplica Ram–Lak en frecuencia a una proyección 1D."""
-    s = np.asarray(signal_1d, dtype=float)
-    n = s.size
-    S = np.fft.rfft(s, n=n)
-    H = ram_lak_filter(n)
-    return np.fft.irfft(S * H, n=n)
-
-def filtered_backprojection(sinogram: np.ndarray,
-                            angles_degrees: np.ndarray | None = None,
-                            rows: int | None = None,
-                            normalize: bool = True) -> np.ndarray:
-    """
-    Reconstrucción por backprojection filtrada.
-    """
-    S = np.asarray(sinogram, dtype=float)
     # Esperado: filas = ángulos, columnas = detectores. Si no, transpone.
-    if S.shape[0] < S.shape[1]:
-        S = S.T
-    n_angles, n_det = S.shape
+    sino = np.array(sinogram, dtype=float)
+    if sino.shape[0] < sino.shape[1]:
+        sino = sino.T
+    
+    n_angles, n_detectors = sino.shape
+    
+    if angles is None:
+        angles = np.linspace(0, 180, n_angles, endpoint=False)
+    
+    # Output image size
+    img_size = n_detectors
+    
+    # Cree grids
+    center = img_size // 2
+    x = np.arange(img_size) - center
+    y = np.arange(img_size) - center
+    X, Y = np.meshgrid(x, y)
 
-    if angles_degrees is None:
-        angles = np.linspace(0.0, 180.0, n_angles, endpoint=False)
-    else:
-        angles = np.asarray(angles_degrees)
-        if angles.size != n_angles:
-            raise ValueError("angles_degrees debe tener n_ángulos elementos.")
+    # Reconstrucción
+    reconstruction = np.zeros((img_size, img_size))
+    
+    # Aplicar filtro a cada proyección
+    filtered_projections = np.zeros_like(sino)
+    
+    for i in range(n_angles):
+        proj = sino[i, :]
 
-    if rows is None:
-        rows = int(n_det)
+        # Zero-padding para mejorar la FFT
+        padded_size = 2 ** int(np.ceil(np.log2(2 * len(proj))))
+        proj_padded = np.zeros(padded_size)
+        start_idx = (padded_size - len(proj)) // 2
+        proj_padded[start_idx:start_idx + len(proj)] = proj
 
-    recon = np.zeros((rows, rows), dtype=float)
+        # Aplicar filtro Ram-Lak
+        proj_fft = np.fft.fft(proj_padded)
+        freqs = np.fft.fftfreq(padded_size)
 
-    for k, ang in enumerate(angles):
-        # 1) proyección 1D y filtrado pasa-altas
-        proj = S[k, :]
-        signal = filter_projection(proj)   # señal filtrada
+        # Ram-Lak (ramp) filtro con ventana de Hann
+        ramp = np.abs(freqs)
+        # Suavizar el filtro para reducir artefactos
+        hann = 0.5 * (1 + np.cos(2 * np.pi * freqs))
+        filter_kernel = ramp * hann
 
-        rotation_angle = ang
-        imagen_rotada = ndi.rotate(
-            np.tile(signal[:, None], rows).T,  # (rows, n_det)
-            rotation_angle,
-            reshape=False,
-            mode="reflect"
-        )
+        # Aplique el filtro
+        filtered_fft = proj_fft * filter_kernel
+        filtered_proj_padded = np.real(np.fft.ifft(filtered_fft))
 
-        # 3) Acumular
-        recon += imagen_rotada
+        # Extraer proyección filtrada
+        filtered_projections[i, :] = filtered_proj_padded[start_idx:start_idx + len(proj)]
+    
+    # Retroproyección de proyecciones filtradas
+    for i, angle in enumerate(angles):
+        angle_rad = np.deg2rad(angle)
 
-    if normalize:
-        vmin, vmax = float(recon.min()), float(recon.max())
-        if vmax > vmin:
-            recon = (recon - vmin) / (vmax - vmin)
-        else:
-            recon[:] = 0.0
-    return recon
+        # Calcular la coordenada de proyección para cada píxel
+        cos_a = np.cos(angle_rad)
+        sin_a = np.sin(angle_rad)
 
-# 5
-sinogram_path = "1.npy"   # ajusta si tu archivo está en otra ruta
-output_path   = "4.png"
+        # Proyectar coordenadas sobre la línea del detector
+        t = X * cos_a + Y * sin_a
 
-# 1) Cargar sinograma
+        # Posiciones de los detectores
+        detector_positions = np.arange(n_detectors) - n_detectors // 2
+
+        # Interpolar valores de proyección
+        projection_values = np.interp(t, detector_positions, filtered_projections[i, :],
+                                    left=0, right=0)
+
+        # Agregar a la reconstrucción
+        reconstruction += projection_values
+
+    # Aplicar factor de escala
+    reconstruction *= np.pi / (2 * n_angles)
+
+    # Aplicar máscara circular para eliminar artefactos en los bordes
+    radius = min(img_size // 2 - 2, n_detectors // 2)
+    mask = (X**2 + Y**2) <= radius**2
+    reconstruction[~mask] = 0
+    
+    return reconstruction
+
+# Cargar y procesar el sinograma
+sinogram_path = "1.npy"
+output_path = "4.png"
+
+
 S = np.load(sinogram_path)
 
-# 2) Forzar orientación esperada: filas=ángulos, columnas=detectores
-Sin = S if S.shape[0] >= S.shape[1] else S.T
-# 3) Reconstrucción FBP con parámetros conservadores (recuperar visibilidad)
-#    - Filtro: Ram-Lak puro (pasa-altas) SIN cutoff
-#    - Sin pre-blur
-#    - Rotación bilineal (order=1)
-#    - SIN máscara circular
-#    - SIN auto-orientación (ya orientamos arriba)
 
-recon = filtered_backprojection(Sin, angles_degrees=None, rows=Sin.shape[1], normalize=True)
+# Asegurar la orientación adecuada
+if S.shape[0] < S.shape[1]:
+    S = S.T
 
-# 4) Guardar PNG (normalizado en la función)
-img_u8 = (np.clip(recon, 0, 1) * 255).astype(np.uint8)
+# Realizar reconstrucción limpia
+reconstruction = clean_filtered_backprojection(S)
+
+# Normalizar y mejorar
+def normalize_image(img):
+    """Normalización robusta utilizando percentiles"""
+    # Eliminar ceros y valores muy pequeños para el cálculo de percentiles
+    nonzero_vals = img[img > np.percentile(img, 5)]
+    if len(nonzero_vals) > 0:
+        p1, p99 = np.percentile(nonzero_vals, [1, 99])
+        normalized = np.clip((img - p1) / (p99 - p1 + 1e-8), 0, 1)
+    else:
+        normalized = img / (img.max() + 1e-8)
+    return normalized
+
+# Normalizar la reconstrucción
+recon_norm = normalize_image(reconstruction)
+
+# Convertir a formato de imagen
+img_u8 = (recon_norm * 255).astype(np.uint8)
 Image.fromarray(img_u8).save(output_path)
-
-# 5) Visualización con estiramiento de contraste (solo para pantalla)
-p1, p99 = np.percentile(recon, [1, 99])
-fig, ax = plt.subplots(1, 2, figsize=(10, 4))
-
-im0 = ax[0].imshow(Sin, aspect="auto", cmap="gray")
-ax[0].set_title("Sínograma (orientado)")
-ax[0].set_xlabel("Detectores")
-ax[0].set_ylabel("Ángulos")
-plt.colorbar(im0, ax=ax[0], fraction=0.046, pad=0.04)
-
-im1 = ax[1].imshow(recon, cmap="gray", vmin=p1, vmax=p99)
-ax[1].set_title("Reconstrucción (FBP)")
-ax[1].axis("off")
-plt.colorbar(im1, ax=ax[1], fraction=0.046, pad=0.04)
-
-
-
-
-
-
-
