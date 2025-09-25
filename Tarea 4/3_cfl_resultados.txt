@@ -1,0 +1,7 @@
+Resultados del cálculo de CFL para la ecuación de KdV
+----------------------------------------------------
+
+Conjunto 1: dt=0.001, dx=0.1, u_max=1.9959 → CFL = 0.1198
+Conjunto 2: dt=0.002, dx=0.05, u_max=1.9935 → CFL = 0.4785
+Conjunto 3: dt=0.005, dx=0.2, u_max=1.9918 → CFL = 0.2988
+Conjunto 4: dt=0.001, dx=0.05, u_max=1.9959 → CFL = 0.2395
