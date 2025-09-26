@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Sequence, Tuple
 
-from pdf_plot import line_plot_lines, linspace, write_custom_pdf, write_line_plot_pdf
 
 J_COUPLING = 1.0
 OUTPUT_DIR = Path(__file__).resolve().parent
@@ -308,6 +307,448 @@ def run_point_1b(rng: random.Random) -> None:
 def main() -> None:
     run_point_1a(random.Random(12345))
     run_point_1b(random.Random(67890))
+
+
+
+
+from __future__ import annotations
+
+import math
+from pathlib import Path
+from typing import List, Optional, Sequence, Tuple
+
+Color = Tuple[float, float, float]
+Point = Tuple[float, float]
+
+
+def linspace(start: float, stop: float, count: int) -> List[float]:
+    if count <= 1:
+        return [start]
+    step = (stop - start) / (count - 1)
+    return [start + i * step for i in range(count)]
+
+
+def _nice_ticks(min_val: float, max_val: float, target: int = 5) -> List[float]:
+    if math.isclose(max_val, min_val):
+        delta = 1.0 if not math.isclose(min_val, 0.0) else 0.5
+        return [min_val - delta, min_val, min_val + delta]
+    raw_step = (max_val - min_val) / max(target - 1, 1)
+    magnitude = 10 ** math.floor(math.log10(abs(raw_step))) if raw_step != 0 else 1
+    residual = abs(raw_step) / magnitude
+    if residual >= 5:
+        step = 5 * magnitude
+    elif residual >= 2:
+        step = 2 * magnitude
+    else:
+        step = magnitude
+
+    start = math.floor(min_val / step) * step
+    ticks: List[float] = []
+    value = start
+    while value <= max_val + step * 0.5:
+        ticks.append(round(value, 10))
+        value += step
+    if len(ticks) < 2:
+        ticks.append(round(value, 10))
+    return ticks
+
+
+def _escape_text(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _split_symbol_segments(text: str) -> List[Tuple[str, str]]:
+    segments: List[Tuple[str, str]] = []
+    current_font = "F1"
+    buffer: List[str] = []
+
+    def flush() -> None:
+        nonlocal buffer, current_font
+        if buffer:
+            segments.append((current_font, "".join(buffer)))
+            buffer = []
+
+    for char in text:
+        if char == "β":
+            flush()
+            segments.append(("F2", "b"))
+            current_font = "F1"
+        else:
+            if current_font != "F1":
+                flush()
+                current_font = "F1"
+            buffer.append(char)
+
+    flush()
+    return segments
+
+
+def _estimate_text_width(text: str) -> float:
+    width = 0.0
+    for char in text:
+        if char == "β":
+            width += 5.0
+        elif char == " ":
+            width += 3.0
+        else:
+            width += 4.5
+    return width
+
+
+def _format_tick(value: float) -> str:
+    if value == 0:
+        return "0"
+    abs_value = abs(value)
+    if abs_value >= 1000 or abs_value < 0.01:
+        return f"{value:.2e}"
+    if abs_value < 1:
+        return f"{value:.3f}".rstrip("0").rstrip(".")
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def _build_pdf(content: str, width: float, height: float) -> bytes:
+    content_bytes = content.encode("ascii")
+    objects: List[bytes] = []
+    objects.append(b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n")
+    objects.append(b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n")
+    page_obj = f"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 {width:.2f} {height:.2f}] /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> /Contents 4 0 R >> endobj\n".encode("ascii")
+    objects.append(page_obj)
+    stream_header = f"4 0 obj << /Length {len(content_bytes)} >>\nstream\n".encode("ascii")
+    stream_footer = b"\nendstream\nendobj\n"
+    objects.append(stream_header + content_bytes + stream_footer)
+    objects.append(b"5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n")
+    objects.append(b"6 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Symbol >> endobj\n")
+
+    pdf_parts: List[bytes] = [b"%PDF-1.4\n"]
+    offsets: List[int] = [0] * (len(objects) + 1)
+    current_offset = len(pdf_parts[0])
+    for index, obj in enumerate(objects, start=1):
+        offsets[index] = current_offset
+        pdf_parts.append(obj)
+        current_offset += len(obj)
+
+    xref_offset = current_offset
+    xref_lines = [f"xref\n0 {len(objects) + 1}\n".encode("ascii")]
+    xref_lines.append(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        xref_lines.append(f"{offset:010d} 00000 n \n".encode("ascii"))
+    pdf_parts.extend(xref_lines)
+    trailer = f"trailer << /Root 1 0 R /Size {len(objects) + 1} >>\nstartxref\n{xref_offset}\n%%EOF\n".encode("ascii")
+    pdf_parts.append(trailer)
+    return b"".join(pdf_parts)
+
+
+def _generate_line_plot_lines(
+    series: Sequence[dict],
+    *,
+    title: str,
+    x_label: str,
+    y_label: str,
+    width: float,
+    height: float,
+    margin_left: float,
+    margin_right: float,
+    margin_bottom: float,
+    margin_top: float,
+    x_ticks: Optional[Sequence[float]] = None,
+    y_ticks: Optional[Sequence[float]] = None,
+    offset_x: float = 0.0,
+    offset_y: float = 0.0,
+    annotations: Optional[Sequence[dict]] = None,
+    x_padding_ratio: float = 0.05,
+    y_padding_ratio: float = 0.1,
+    axis_line_width: float = 1.0,
+    draw_box: bool = True,
+    x_tick_labels: Optional[Sequence[str]] = None,
+    y_tick_labels: Optional[Sequence[str]] = None,
+    x_label_offset: float = 40.0,
+    y_label_offset: float = 60.0,
+) -> List[str]:
+    if not series:
+        raise ValueError("No data provided for plot")
+
+    all_points: List[Point] = []
+    for entry in series:
+        all_points.extend(entry["points"])
+
+    x_values = [p[0] for p in all_points]
+    y_values = [p[1] for p in all_points]
+
+    x_min = min(x_values)
+    x_max = max(x_values)
+    y_min = min(y_values)
+    y_max = max(y_values)
+
+    if math.isclose(x_max, x_min):
+        x_min -= 0.5
+        x_max += 0.5
+    if math.isclose(y_max, y_min):
+        y_min -= 0.5
+        y_max += 0.5
+
+    x_padding = (x_max - x_min) * x_padding_ratio
+    y_padding = (y_max - y_min) * y_padding_ratio
+    x_min -= x_padding
+    x_max += x_padding
+    y_min -= y_padding
+    y_max += y_padding
+
+    plot_width = width - margin_left - margin_right
+    plot_height = height - margin_bottom - margin_top
+
+    def map_x(value: float) -> float:
+        return offset_x + margin_left + (value - x_min) / (x_max - x_min) * plot_width
+
+    def map_y(value: float) -> float:
+        return offset_y + margin_bottom + (value - y_min) / (y_max - y_min) * plot_height
+
+    x_axis_y = offset_y + margin_bottom
+    y_axis_x = offset_x + margin_left
+    x_axis_end = offset_x + margin_left + plot_width
+    y_axis_top = offset_y + margin_bottom + plot_height
+
+    if x_ticks is None:
+        x_ticks = _nice_ticks(x_min, x_max, target=5)
+    if y_ticks is None:
+        y_ticks = _nice_ticks(y_min, y_max, target=5)
+
+    lines: List[str] = []
+    lines.append("0 0 0 RG 0 0 0 rg")
+    lines.append(f"{axis_line_width:.2f} w")
+    lines.append(f"{y_axis_x:.2f} {x_axis_y:.2f} m {x_axis_end:.2f} {x_axis_y:.2f} l S")
+    lines.append(f"{y_axis_x:.2f} {x_axis_y:.2f} m {y_axis_x:.2f} {y_axis_top:.2f} l S")
+    if draw_box:
+        lines.append(f"{y_axis_x:.2f} {y_axis_top:.2f} m {x_axis_end:.2f} {y_axis_top:.2f} l S")
+        lines.append(f"{x_axis_end:.2f} {x_axis_y:.2f} m {x_axis_end:.2f} {y_axis_top:.2f} l S")
+    lines.append("1 w")
+
+    tick_length = 6.0
+    for idx, tick in enumerate(x_ticks):
+        px = map_x(tick)
+        lines.append(f"{px:.2f} {x_axis_y:.2f} m {px:.2f} {x_axis_y - tick_length:.2f} l S")
+        if x_tick_labels is not None and idx < len(x_tick_labels):
+            label = x_tick_labels[idx]
+        else:
+            label = _format_tick(tick)
+        text_width = len(label) * 3.5
+        text_x = px - text_width / 2
+        text_y = x_axis_y - tick_length - 12
+        lines.append(f"BT /F1 10 Tf {text_x:.2f} {text_y:.2f} Td ({_escape_text(label)}) Tj ET")
+
+    for idx, tick in enumerate(y_ticks):
+        py = map_y(tick)
+        lines.append(f"{y_axis_x:.2f} {py:.2f} m {y_axis_x - tick_length:.2f} {py:.2f} l S")
+        if y_tick_labels is not None and idx < len(y_tick_labels):
+            label = y_tick_labels[idx]
+        else:
+            label = _format_tick(tick)
+        text_width = len(label) * 3.5
+        text_x = y_axis_x - tick_length - 4 - text_width
+        text_y = py - 3
+        lines.append(f"BT /F1 10 Tf {text_x:.2f} {text_y:.2f} Td ({_escape_text(label)}) Tj ET")
+
+    title_width = _estimate_text_width(title)
+    title_x = offset_x + margin_left + (plot_width - title_width) / 2
+    title_y = y_axis_top + 30
+    for font_name, segment in _split_symbol_segments(title):
+        if not segment:
+            continue
+        lines.append(f"BT /{font_name} 14 Tf {title_x:.2f} {title_y:.2f} Td ({_escape_text(segment)}) Tj ET")
+        title_x += _estimate_text_width(segment)
+
+    xlabel_width = _estimate_text_width(x_label)
+    xlabel_x = offset_x + margin_left + (plot_width - xlabel_width) / 2
+    xlabel_y = x_axis_y - x_label_offset
+    for font_name, segment in _split_symbol_segments(x_label):
+        if not segment:
+            continue
+        lines.append(f"BT /{font_name} 12 Tf {xlabel_x:.2f} {xlabel_y:.2f} Td ({_escape_text(segment)}) Tj ET")
+        xlabel_x += _estimate_text_width(segment)
+
+    ylabel_x = offset_x + margin_left - y_label_offset
+    ylabel_y = offset_y + margin_bottom + plot_height / 2
+    lines.append(f"BT /F1 12 Tf 0 1 -1 0 {ylabel_x:.2f} {ylabel_y:.2f} Tm ({_escape_text(y_label)}) Tj ET")
+
+    legend_entries = []
+    for entry in series:
+        pts = sorted(entry["points"], key=lambda p: p[0])
+        if len(pts) < 2:
+            continue
+        color: Color = entry.get("color", (0.0, 0.0, 0.0))
+        width_setting = entry.get("width", 1.2)
+        dash = entry.get("dash")
+        label = entry.get("label")
+        if label:
+            legend_entries.append((label, color, width_setting, dash))
+        lines.append(f"{width_setting:.2f} w")
+        lines.append(f"{color[0]:.3f} {color[1]:.3f} {color[2]:.3f} RG")
+        if dash:
+            lines.append(f"[{dash[0]:.2f} {dash[1]:.2f}] 0 d")
+        else:
+            lines.append("[] 0 d")
+        first = pts[0]
+        lines.append(f"{map_x(first[0]):.2f} {map_y(first[1]):.2f} m")
+        for x_val, y_val in pts[1:]:
+            lines.append(f"{map_x(x_val):.2f} {map_y(y_val):.2f} l")
+        lines.append("S")
+
+    lines.append("[] 0 d")
+
+    if legend_entries:
+        legend_width = 150.0
+        legend_line_length = 24.0
+        legend_spacing = 14.0
+        legend_x = offset_x + margin_left + plot_width - legend_width
+        legend_y = offset_y + margin_bottom + plot_height - 10.0
+        for idx, (label, color, width_setting, dash) in enumerate(legend_entries):
+            baseline_y = legend_y - idx * legend_spacing
+            lines.append(f"{width_setting:.2f} w")
+            lines.append(f"{color[0]:.3f} {color[1]:.3f} {color[2]:.3f} RG")
+            if dash:
+                lines.append(f"[{dash[0]:.2f} {dash[1]:.2f}] 0 d")
+            else:
+                lines.append("[] 0 d")
+            lines.append(f"{legend_x:.2f} {baseline_y:.2f} m {legend_x + legend_line_length:.2f} {baseline_y:.2f} l S")
+            text_x = legend_x + legend_line_length + 6.0
+            lines.append(f"BT /F1 10 Tf {text_x:.2f} {baseline_y - 3:.2f} Td ({_escape_text(label)}) Tj ET")
+        lines.append("[] 0 d")
+
+    if annotations:
+        for entry in annotations:
+            text = entry.get("text", "")
+            x_val = float(entry.get("x", 0.0))
+            y_val = float(entry.get("y", 0.0))
+            color: Color = entry.get("color", (0.0, 0.0, 0.0))
+            size = float(entry.get("size", 12.0))
+            px = map_x(x_val)
+            py = map_y(y_val)
+            specified_font = entry.get("font")
+            segments = _split_symbol_segments(text) if specified_font is None else [(specified_font, text)]
+            lines.append(f"{color[0]:.3f} {color[1]:.3f} {color[2]:.3f} rg")
+            current_x = px
+            for font_name, segment in segments:
+                if not segment:
+                    continue
+                lines.append(f"BT /{font_name} {size:.2f} Tf {current_x:.2f} {py:.2f} Td ({_escape_text(segment)}) Tj ET")
+                current_x += _estimate_text_width(segment)
+            lines.append("0 0 0 rg")
+
+    return lines
+
+
+def line_plot_lines(
+    series: Sequence[dict],
+    *,
+    title: str,
+    x_label: str,
+    y_label: str,
+    width: float,
+    height: float,
+    margin_left: float = 70.0,
+    margin_right: float = 40.0,
+    margin_bottom: float = 70.0,
+    margin_top: float = 50.0,
+    x_ticks: Optional[Sequence[float]] = None,
+    y_ticks: Optional[Sequence[float]] = None,
+    offset_x: float = 0.0,
+    offset_y: float = 0.0,
+    annotations: Optional[Sequence[dict]] = None,
+    x_padding_ratio: float = 0.05,
+    y_padding_ratio: float = 0.1,
+    axis_line_width: float = 1.0,
+    draw_box: bool = True,
+    x_tick_labels: Optional[Sequence[str]] = None,
+    y_tick_labels: Optional[Sequence[str]] = None,
+    x_label_offset: float = 40.0,
+    y_label_offset: float = 60.0,
+) -> List[str]:
+    return _generate_line_plot_lines(
+        series,
+        title=title,
+        x_label=x_label,
+        y_label=y_label,
+        width=width,
+        height=height,
+        margin_left=margin_left,
+        margin_right=margin_right,
+        margin_bottom=margin_bottom,
+        margin_top=margin_top,
+        x_ticks=x_ticks,
+        y_ticks=y_ticks,
+        offset_x=offset_x,
+        offset_y=offset_y,
+        annotations=annotations,
+        x_padding_ratio=x_padding_ratio,
+        y_padding_ratio=y_padding_ratio,
+        axis_line_width=axis_line_width,
+        draw_box=draw_box,
+        x_tick_labels=x_tick_labels,
+        y_tick_labels=y_tick_labels,
+        x_label_offset=x_label_offset,
+        y_label_offset=y_label_offset,
+    )
+
+
+def write_line_plot_pdf(
+    path: Path,
+    series: Sequence[dict],
+    *,
+    title: str,
+    x_label: str,
+    y_label: str,
+    width: float = 612.0,
+    height: float = 396.0,
+    margin_left: float = 70.0,
+    margin_right: float = 40.0,
+    margin_bottom: float = 70.0,
+    margin_top: float = 50.0,
+    x_ticks: Optional[Sequence[float]] = None,
+    y_ticks: Optional[Sequence[float]] = None,
+    annotations: Optional[Sequence[dict]] = None,
+    x_padding_ratio: float = 0.05,
+    y_padding_ratio: float = 0.1,
+    axis_line_width: float = 1.0,
+    draw_box: bool = True,
+    x_tick_labels: Optional[Sequence[str]] = None,
+    y_tick_labels: Optional[Sequence[str]] = None,
+    x_label_offset: float = 40.0,
+    y_label_offset: float = 60.0,
+) -> None:
+    lines = _generate_line_plot_lines(
+        series,
+        title=title,
+        x_label=x_label,
+        y_label=y_label,
+        width=width,
+        height=height,
+        margin_left=margin_left,
+        margin_right=margin_right,
+        margin_bottom=margin_bottom,
+        margin_top=margin_top,
+        x_ticks=x_ticks,
+        y_ticks=y_ticks,
+        offset_x=0.0,
+        offset_y=0.0,
+        annotations=annotations,
+        x_padding_ratio=x_padding_ratio,
+        y_padding_ratio=y_padding_ratio,
+        axis_line_width=axis_line_width,
+        draw_box=draw_box,
+        x_tick_labels=x_tick_labels,
+        y_tick_labels=y_tick_labels,
+        x_label_offset=x_label_offset,
+        y_label_offset=y_label_offset,
+    )
+    content = "\n".join(lines)
+    pdf_bytes = _build_pdf(content, width, height)
+    path.write_bytes(pdf_bytes)
+
+
+def write_custom_pdf(path: Path, lines: Sequence[str], width: float, height: float) -> None:
+    content = "\n".join(lines)
+    pdf_bytes = _build_pdf(content, width, height)
+    path.write_bytes(pdf_bytes)
+
 
 
 if __name__ == "__main__":
