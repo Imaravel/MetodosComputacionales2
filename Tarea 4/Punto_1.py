@@ -4,6 +4,7 @@ import matplotlib.animation as animation
 from scipy.integrate import simpson
 import os
 
+
 # --- Parámetros Generales de la Simulación ---
 L = 40.0
 Nx = 1024
@@ -61,25 +62,6 @@ def solve_schrodinger(psi0, V_func, t_final, dt):
     return np.array(psi_t), np.linspace(0, t_final, num_steps), np.array(mu_t), np.array(sigma_t)
 
 # --- Funciones para Graficar y Animar ---
-def _resolve_animation_target(filename):
-    root, ext = os.path.splitext(filename)
-    ext = ext.lower()
-
-    if ext == '.mp4':
-        if animation.writers.is_available('ffmpeg'):
-            return filename, 'ffmpeg'
-        fallback = root + '.gif'
-        print('FFmpeg no está disponible; se guardará la animación como GIF en', fallback)
-        return fallback, 'pillow'
-
-    if ext in ('.gif', '.apng'):
-        return filename, 'pillow'
-
-    fallback = root + '.gif'
-    print('Extensión desconocida para animación, se usará GIF en', fallback)
-    return fallback, 'pillow'
-
-
 def create_animation(psi_t, V_func, filename, t_final):
     fig, ax = plt.subplots()
     prob_density_t = np.abs(psi_t)**2
@@ -103,8 +85,7 @@ def create_animation(psi_t, V_func, filename, t_final):
     frame_step = max(1, len(psi_t) // 300)
     frames = range(0, len(psi_t), frame_step)
     anim = animation.FuncAnimation(fig, animate, frames=frames, blit=True)
-    filename, writer = _resolve_animation_target(filename)
-    anim.save(filename, writer=writer, fps=30, dpi=150)
+    anim.save(filename, writer='ffmpeg', fps=30, dpi=150)
     plt.close(fig)
 
 def create_uncertainty_plot(t_array, mu_t, sigma_t, filename):
@@ -141,3 +122,5 @@ psi0 = get_initial_psi()
 psi_t_c, t_c, mu_c, sigma_c = solve_schrodinger(psi0, V_hat, T_FINAL_C, DT_C)
 create_animation(psi_t_c, V_hat, '1.c.mp4', T_FINAL_C)
 create_uncertainty_plot(t_c, mu_c, sigma_c, '1.c.pdf')
+
+
