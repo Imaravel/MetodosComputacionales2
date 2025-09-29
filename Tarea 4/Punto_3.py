@@ -104,7 +104,7 @@ L = 40.0        # longitud del dominio
 N = 256         # número de puntos espaciales
 x = np.linspace(0, L, N, endpoint=False)
 delta = 0.22    # parámetro de dispersión
-steps = 2000    # pasos para animación
+steps = 20000    # pasos para animación
 dt = 1e-3
 
 # Espacio de Fourier
@@ -138,14 +138,14 @@ for n in range(steps):
     phi_hat = rk4(phi_hat, dt, k, delta)
     if n % 20 == 0:
         # Definir A(t) que crece lentamente
-        A_t = 1.0 + 0.002*n
+        A_t = 1.0 + 0.0002*n
         phi = np.fft.ifft(phi_hat).real
         frames.append((A_t * phi, A_t))
 
 # --- Animación ---
 fig, ax = plt.subplots()
 line, = ax.plot(x, frames[0][0])
-ax.set_ylim(-5, 5)
+ax.set_ylim(-10, 10)
 ax.set_title("Evolución de la ecuación KdV con amplitud creciente")
 
 def update(i):
